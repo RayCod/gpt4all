@@ -1,15 +1,11 @@
 #include "../../gpt4all-backend/llmodel_c.h"
 #include "../../gpt4all-backend/llmodel.h"
-#include "../../gpt4all-backend/llama.cpp/llama.h"
 #include "../../gpt4all-backend/llmodel_c.cpp"
-#include "../../gpt4all-backend/mpt.h"
-#include "../../gpt4all-backend/mpt.cpp"
 
-#include "../../gpt4all-backend/llamamodel.h"
-#include "../../gpt4all-backend/gptj.h"
 #include "binding.h"
 #include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -19,47 +15,28 @@
 #include <iostream>
 #include <unistd.h>
 
-void* load_mpt_model(const char *fname, int n_threads) {
+void* load_model(const char *fname, int n_threads) {
     // load the model
-    auto gptj = llmodel_mpt_create();
-
-    llmodel_setThreadCount(gptj,  n_threads);
-    if (!llmodel_loadModel(gptj, fname)) {
+    const char *new_error;
+    auto model = llmodel_model_create2(fname, "auto", &new_error);
+    if (model == nullptr) {
+        fprintf(stderr, "%s: error '%s'\n", __func__, new_error);
+        return nullptr;
+    }
+    if (!llmodel_loadModel(model, fname, 2048, 100)) {
+        llmodel_model_destroy(model);
         return nullptr;
     }
 
-    return gptj;
-}
-
-void* load_llama_model(const char *fname, int n_threads) {
-    // load the model
-    auto gptj = llmodel_llama_create();
-
-    llmodel_setThreadCount(gptj,  n_threads);
-    if (!llmodel_loadModel(gptj, fname)) {
-        return nullptr;
-    }
-
-    return gptj;
-}
-
-void* load_gptj_model(const char *fname, int n_threads) {
-    // load the model
-    auto gptj = llmodel_gptj_create();
-
-    llmodel_setThreadCount(gptj,  n_threads);
-    if (!llmodel_loadModel(gptj, fname)) {
-        return nullptr;
-    }
-
-    return gptj;
+    llmodel_setThreadCount(model,  n_threads);
+    return model;
 }
 
 std::string res = "";
 void * mm;
 
-void gptj_model_prompt( const char *prompt, void *m, char* result, int repeat_last_n, float repeat_penalty, int n_ctx, int tokens, int top_k,
-                            float top_p, float temp, int n_batch,float ctx_erase)
+void model_prompt( const char *prompt, void *m, char* result, int repeat_last_n, float repeat_penalty, int n_ctx, int tokens, int top_k,
+                            float top_p, float min_p, float temp, int n_batch,float ctx_erase)
 {
     llmodel_model* model = (llmodel_model*) m;
 
@@ -92,6 +69,7 @@ void gptj_model_prompt( const char *prompt, void *m, char* result, int repeat_la
         .n_predict = 50,
         .top_k = 10,
         .top_p = 0.9,
+        .min_p = 0.0,
         .temp = 1.0,
         .n_batch = 1,
         .repeat_penalty = 1.2,
@@ -106,6 +84,7 @@ void gptj_model_prompt( const char *prompt, void *m, char* result, int repeat_la
     prompt_context->top_k = top_k;
     prompt_context->context_erase = ctx_erase;
     prompt_context->top_p = top_p;
+    prompt_context->min_p = min_p;
     prompt_context->temp = temp;
     prompt_context->n_batch = n_batch;    
 
@@ -120,8 +99,8 @@ void gptj_model_prompt( const char *prompt, void *m, char* result, int repeat_la
     free(prompt_context);
 }
 
-void gptj_free_model(void *state_ptr) {
+void free_model(void *state_ptr) {
     llmodel_model* ctx = (llmodel_model*) state_ptr;
-    llmodel_llama_destroy(ctx);
+    llmodel_model_destroy(*ctx);
 }
 

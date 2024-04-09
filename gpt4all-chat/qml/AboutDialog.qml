@@ -7,11 +7,10 @@ import download
 import network
 import llm
 
-Dialog {
+MyDialog {
     id: abpoutDialog
     anchors.centerIn: parent
     modal: false
-    opacity: 0.9
     padding: 20
     width: 1024
     height: column.height + 40
@@ -40,6 +39,8 @@ Dialog {
                 anchors.verticalCenter: img.verticalCenter
                 text: qsTr("About GPT4All")
                 color: theme.textColor
+                font.pixelSize: theme.fontSizeLarge
+                font.bold: true
             }
         }
 
@@ -50,35 +51,29 @@ Dialog {
             ScrollBar.vertical.policy: ScrollBar.AlwaysOn
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-            TextArea {
+            MyTextArea {
                 id: welcome
-                wrapMode: Text.Wrap
                 width: 1024 - 40
-                padding: 20
                 textFormat: TextEdit.MarkdownText
                 text: qsTr("### Release notes\n")
                     + Download.releaseInfo.notes
                     + qsTr("### Contributors\n")
                     + Download.releaseInfo.contributors
-                color: theme.textColor
                 focus: false
                 readOnly: true
                 Accessible.role: Accessible.Paragraph
                 Accessible.name: qsTr("Release notes")
                 Accessible.description: qsTr("Release notes for this version")
-                background: Rectangle {
-                    color: theme.backgroundLight
-                    radius: 10
-                }
             }
         }
 
-        Label {
+        MySettingsLabel {
             id: discordLink
             width: parent.width
-            textFormat: Text.RichText
+            textFormat: Text.StyledText
             wrapMode: Text.WordWrap
             text: qsTr("Check out our discord channel <a href=\"https://discord.gg/4M2QFmTt2k\">https://discord.gg/4M2QFmTt2k</a>")
+            font.pixelSize: theme.fontSizeLarge
             onLinkActivated: { Qt.openUrlExternally("https://discord.gg/4M2QFmTt2k") }
             color: theme.textColor
             linkColor: theme.linkColor
@@ -87,12 +82,13 @@ Dialog {
             Accessible.name: qsTr("Discord link")
         }
 
-        Label {
+        MySettingsLabel {
             id: nomicProps
             width: parent.width
-            textFormat: Text.RichText
+            textFormat: Text.StyledText
             wrapMode: Text.WordWrap
             text: qsTr("Thank you to <a href=\"https://home.nomic.ai\">Nomic AI</a> and the community for contributing so much great data, code, ideas, and energy to the growing open source AI ecosystem!")
+            font.pixelSize: theme.fontSizeLarge
             onLinkActivated: { Qt.openUrlExternally("https://home.nomic.ai") }
             color: theme.textColor
             linkColor: theme.linkColor
@@ -103,11 +99,16 @@ Dialog {
         }
     }
 
-    background: Rectangle {
-        anchors.fill: parent
-        color: theme.backgroundDarkest
-        border.width: 1
-        border.color: theme.dialogBorder
-        radius: 10
+    MyButton {
+        id: checkForUpdatesButton
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        text: qsTr("Check for updates...")
+        font.pixelSize: theme.fontSizeLarge
+        Accessible.description: qsTr("Launch an external application that will check for updates to the installer")
+        onClicked: {
+            if (!LLM.checkForUpdates())
+                checkForUpdatesError.open()
+        }
     }
 }

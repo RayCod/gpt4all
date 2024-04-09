@@ -9,10 +9,13 @@ use_directory_urls: false
 
 nav:
     - 'index.md'
-    - 'gpt4all_chat.md'
-    - 'gpt4all_python.md'
-    - 'Tutorials':
-      - 'gpt4all_modal.md'
+    - 'GPT4All Chat Client': 'gpt4all_chat.md'
+    - 'Bindings':
+      - 'GPT4All in Python':
+        - 'Generation': 'gpt4all_python.md'
+        - 'Embedding': 'gpt4all_python_embedding.md'
+      - 'GPT4ALL in NodeJs': 'gpt4all_nodejs.md'
+      - 'gpt4all_cli.md'
     - 'Wiki':
       - 'gpt4all_faq.md'
 
@@ -39,8 +42,8 @@ markdown_extensions:
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.emoji:
-      emoji_index: !!python/name:materialx.emoji.twemoji
-      emoji_generator: !!python/name:materialx.emoji.to_svg
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
       options:
         custom_icons:
           - docs/overrides/.icons

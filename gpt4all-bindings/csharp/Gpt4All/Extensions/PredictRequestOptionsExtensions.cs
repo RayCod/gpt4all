@@ -1,6 +1,6 @@
 ﻿using Gpt4All.Bindings;
 
-namespace Gpt4All.Extensions;
+namespace Gpt4All;
 
 public static class PredictRequestOptionsExtensions
 {
@@ -12,6 +12,7 @@ public static class PredictRequestOptionsExtensions
             TokensSize = opts.TokensSize,
             TopK = opts.TopK,
             TopP = opts.TopP,
+            MinP = opts.MinP,
             PastNum = opts.PastConversationTokensNum,
             RepeatPenalty = opts.RepeatPenalty,
             Temperature = opts.Temperature,

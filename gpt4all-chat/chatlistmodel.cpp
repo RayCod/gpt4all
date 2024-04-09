@@ -1,60 +1,38 @@
 #include "chatlistmodel.h"
-#include "download.h"
-#include "llm.h"
+#include "mysettings.h"
 
 #include <QFile>
 #include <QDataStream>
 
 #define CHAT_FORMAT_MAGIC 0xF5D553CC
-#define CHAT_FORMAT_VERSION 2
+#define CHAT_FORMAT_VERSION 7
 
-ChatListModel::ChatListModel(QObject *parent)
-    : QAbstractListModel(parent)
-    , m_newChat(nullptr)
-    , m_dummyChat(nullptr)
-    , m_serverChat(nullptr)
-    , m_currentChat(nullptr)
-    , m_shouldSaveChats(false)
+class MyChatListModel: public ChatListModel { };
+Q_GLOBAL_STATIC(MyChatListModel, chatListModelInstance)
+ChatListModel *ChatListModel::globalInstance()
 {
-    addDummyChat();
+    return chatListModelInstance();
+}
+
+ChatListModel::ChatListModel()
+    : QAbstractListModel(nullptr)
+{
+    addChat();
 
     ChatsRestoreThread *thread = new ChatsRestoreThread;
     connect(thread, &ChatsRestoreThread::chatRestored, this, &ChatListModel::restoreChat);
     connect(thread, &ChatsRestoreThread::finished, this, &ChatListModel::chatsRestoredFinished);
     connect(thread, &ChatsRestoreThread::finished, thread, &QObject::deleteLater);
     thread->start();
-}
 
-bool ChatListModel::shouldSaveChats() const
-{
-    return m_shouldSaveChats;
-}
+    connect(MySettings::globalInstance(), &MySettings::serverChatChanged, this, &ChatListModel::handleServerEnabledChanged);
 
-void ChatListModel::setShouldSaveChats(bool b)
-{
-    if (m_shouldSaveChats == b)
-        return;
-    m_shouldSaveChats = b;
-    emit shouldSaveChatsChanged();
-}
-
-bool ChatListModel::shouldSaveChatGPTChats() const
-{
-    return m_shouldSaveChatGPTChats;
-}
-
-void ChatListModel::setShouldSaveChatGPTChats(bool b)
-{
-    if (m_shouldSaveChatGPTChats == b)
-        return;
-    m_shouldSaveChatGPTChats = b;
-    emit shouldSaveChatGPTChatsChanged();
 }
 
 void ChatListModel::removeChatFile(Chat *chat) const
 {
     Q_ASSERT(chat != m_serverChat);
-    const QString savePath = Download::globalInstance()->downloadLocalModelsPath();
+    const QString savePath = MySettings::globalInstance()->modelPath();
     QFile file(savePath + "/gpt4all-" + chat->id() + ".chat");
     if (!file.exists())
         return;
@@ -63,27 +41,52 @@ void ChatListModel::removeChatFile(Chat *chat) const
         qWarning() << "ERROR: Couldn't remove chat file:" << file.fileName();
 }
 
-void ChatListModel::saveChats() const
+ChatSaver::ChatSaver()
+    : QObject(nullptr)
 {
-    QElapsedTimer timer;
-    timer.start();
-    const QString savePath = Download::globalInstance()->downloadLocalModelsPath();
+    moveToThread(&m_thread);
+    m_thread.start();
+}
+
+void ChatListModel::saveChats()
+{
+    const QString savePath = MySettings::globalInstance()->modelPath();
+    QVector<Chat*> toSave;
     for (Chat *chat : m_chats) {
         if (chat == m_serverChat)
             continue;
-        const bool isChatGPT = chat->modelName().startsWith("chatgpt-");
-        if (!isChatGPT && !m_shouldSaveChats)
+        if (chat->isNewChat())
             continue;
-        if (isChatGPT && !m_shouldSaveChatGPTChats)
-            continue;
+        toSave.append(chat);
+    }
+    if (toSave.isEmpty()) {
+        emit saveChatsFinished();
+        return;
+    }
+
+    ChatSaver *saver = new ChatSaver;
+    connect(this, &ChatListModel::requestSaveChats, saver, &ChatSaver::saveChats, Qt::QueuedConnection);
+    connect(saver, &ChatSaver::saveChatsFinished, this, &ChatListModel::saveChatsFinished, Qt::QueuedConnection);
+    emit requestSaveChats(toSave);
+}
+
+void ChatSaver::saveChats(const QVector<Chat *> &chats)
+{
+    QElapsedTimer timer;
+    timer.start();
+    const QString savePath = MySettings::globalInstance()->modelPath();
+    for (Chat *chat : chats) {
         QString fileName = "gpt4all-" + chat->id() + ".chat";
-        QFile file(savePath + "/" + fileName);
-        bool success = file.open(QIODevice::WriteOnly);
+        QString filePath = savePath + "/" + fileName;
+        QFile originalFile(filePath);
+        QFile tempFile(filePath + ".tmp"); // Temporary file
+
+        bool success = tempFile.open(QIODevice::WriteOnly);
         if (!success) {
-            qWarning() << "ERROR: Couldn't save chat to file:" << file.fileName();
+            qWarning() << "ERROR: Couldn't save chat to temporary file:" << tempFile.fileName();
             continue;
         }
-        QDataStream out(&file);
+        QDataStream out(&tempFile);
 
         out << (quint32)CHAT_FORMAT_MAGIC;
         out << (qint32)CHAT_FORMAT_VERSION;
@@ -91,13 +94,19 @@ void ChatListModel::saveChats() const
 
         qDebug() << "serializing chat" << fileName;
         if (!chat->serialize(out, CHAT_FORMAT_VERSION)) {
-            qWarning() << "ERROR: Couldn't serialize chat to file:" << file.fileName();
-            file.remove();
+            qWarning() << "ERROR: Couldn't serialize chat to file:" << tempFile.fileName();
+            tempFile.remove();
+            continue;
         }
-        file.close();
+
+        if (originalFile.exists())
+            originalFile.remove();
+        tempFile.rename(filePath);
     }
+
     qint64 elapsedTime = timer.elapsed();
     qDebug() << "serializing chats took:" << elapsedTime << "ms";
+    emit saveChatsFinished();
 }
 
 void ChatsRestoreThread::run()
@@ -118,7 +127,7 @@ void ChatsRestoreThread::run()
         QDir dir(settingsPath);
         dir.setNameFilters(QStringList() << "gpt4all-*.chat");
         QStringList fileNames = dir.entryList();
-        for (QString f : fileNames) {
+        for (const QString &f : fileNames) {
             QString filePath = settingsPath + "/" + f;
             QFile file(filePath);
             bool success = file.open(QIODevice::ReadOnly);
@@ -136,11 +145,11 @@ void ChatsRestoreThread::run()
         }
     }
     {
-        const QString savePath = Download::globalInstance()->downloadLocalModelsPath();
+        const QString savePath = MySettings::globalInstance()->modelPath();
         QDir dir(savePath);
         dir.setNameFilters(QStringList() << "gpt4all-*.chat");
         QStringList fileNames = dir.entryList();
-        for (QString f : fileNames) {
+        for (const QString &f : fileNames) {
             QString filePath = savePath + "/" + f;
             QFile file(filePath);
             bool success = file.open(QIODevice::ReadOnly);
@@ -181,48 +190,47 @@ void ChatsRestoreThread::run()
     });
 
     for (FileInfo &f : files) {
-            QFile file(f.file);
-            bool success = file.open(QIODevice::ReadOnly);
-            if (!success) {
-                qWarning() << "ERROR: Couldn't restore chat from file:" << file.fileName();
+        QFile file(f.file);
+        bool success = file.open(QIODevice::ReadOnly);
+        if (!success) {
+            qWarning() << "ERROR: Couldn't restore chat from file:" << file.fileName();
+            continue;
+        }
+        QDataStream in(&file);
+
+        qint32 version = 0;
+        if (!f.oldFile) {
+            // Read and check the header
+            quint32 magic;
+            in >> magic;
+            if (magic != CHAT_FORMAT_MAGIC) {
+                qWarning() << "ERROR: Chat file has bad magic:" << file.fileName();
                 continue;
             }
-            QDataStream in(&file);
 
-            qint32 version = 0;
-            if (!f.oldFile) {
-                // Read and check the header
-                quint32 magic;
-                in >> magic;
-                if (magic != CHAT_FORMAT_MAGIC) {
-                    qWarning() << "ERROR: Chat file has bad magic:" << file.fileName();
-                    continue;
-                }
-
-                // Read the version
-                in >> version;
-                if (version < 1) {
-                    qWarning() << "ERROR: Chat file has non supported version:" << file.fileName();
-                    continue;
-                }
-
-                if (version <= 1)
-                    in.setVersion(QDataStream::Qt_6_2);
+            // Read the version
+            in >> version;
+            if (version < 1) {
+                qWarning() << "ERROR: Chat file has non supported version:" << file.fileName();
+                continue;
             }
 
-            qDebug() << "deserializing chat" << f.file;
+            if (version <= 1)
+                in.setVersion(QDataStream::Qt_6_2);
+        }
 
-            Chat *chat = new Chat;
-            chat->moveToThread(qApp->thread());
-            if (!chat->deserialize(in, version)) {
-                qWarning() << "ERROR: Couldn't deserialize chat from file:" << file.fileName();
-                file.remove();
-            } else {
-                emit chatRestored(chat);
-            }
-            if (f.oldFile)
-               file.remove(); // No longer storing in this directory
-            file.close();
+        qDebug() << "deserializing chat" << f.file;
+
+        Chat *chat = new Chat;
+        chat->moveToThread(qApp->thread());
+        if (!chat->deserialize(in, version)) {
+            qWarning() << "ERROR: Couldn't deserialize chat from file:" << file.fileName();
+        } else {
+            emit chatRestored(chat);
+        }
+        if (f.oldFile)
+           file.remove(); // No longer storing in this directory
+        file.close();
     }
 
     qint64 elapsedTime = timer.elapsed();
@@ -233,43 +241,20 @@ void ChatListModel::restoreChat(Chat *chat)
 {
     chat->setParent(this);
     connect(chat, &Chat::nameChanged, this, &ChatListModel::nameChanged);
-    connect(chat, &Chat::modelLoadingError, this, &ChatListModel::handleModelLoadingError);
 
-    if (m_dummyChat) {
-        beginResetModel();
-        m_chats = QList<Chat*>({chat});
-        setCurrentChat(chat);
-        delete m_dummyChat;
-        m_dummyChat = nullptr;
-        endResetModel();
-    } else {
-        beginInsertRows(QModelIndex(), m_chats.size(), m_chats.size());
-        m_chats.append(chat);
-        endInsertRows();
-    }
+    beginInsertRows(QModelIndex(), m_chats.size(), m_chats.size());
+    m_chats.append(chat);
+    endInsertRows();
 }
 
 void ChatListModel::chatsRestoredFinished()
 {
-    if (m_dummyChat) {
-        beginResetModel();
-        Chat *dummy = m_dummyChat;
-        m_dummyChat = nullptr;
-        m_chats.clear();
-        addChat();
-        delete dummy;
-        endResetModel();
-    }
-
-    if (m_chats.isEmpty())
-        addChat();
-
     addServerChat();
 }
 
 void ChatListModel::handleServerEnabledChanged()
 {
-    if (LLM::globalInstance()->serverEnabled() || m_serverChat != m_currentChat)
+    if (MySettings::globalInstance()->serverChat() || m_serverChat != m_currentChat)
         return;
 
     Chat *nextChat = get(0);

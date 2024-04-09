@@ -3,42 +3,28 @@
 
 #include <QObject>
 
-#include "chatlistmodel.h"
-
 class LLM : public QObject
 {
     Q_OBJECT
-    Q_PROPERTY(ChatListModel *chatListModel READ chatListModel NOTIFY chatListModelChanged)
-    Q_PROPERTY(int32_t threadCount READ threadCount WRITE setThreadCount NOTIFY threadCountChanged)
-    Q_PROPERTY(bool serverEnabled READ serverEnabled WRITE setServerEnabled NOTIFY serverEnabledChanged)
-    Q_PROPERTY(bool compatHardware READ compatHardware NOTIFY compatHardwareChanged)
+    Q_PROPERTY(bool isNetworkOnline READ isNetworkOnline NOTIFY isNetworkOnlineChanged)
 
 public:
     static LLM *globalInstance();
 
-    ChatListModel *chatListModel() const { return m_chatListModel; }
-    int32_t threadCount() const;
-    void setThreadCount(int32_t n_threads);
-    bool serverEnabled() const;
-    void setServerEnabled(bool enabled);
-
-    bool compatHardware() const { return m_compatHardware; }
+    Q_INVOKABLE bool hasSettingsAccess() const;
+    Q_INVOKABLE bool compatHardware() const { return m_compatHardware; }
 
     Q_INVOKABLE bool checkForUpdates() const;
+    Q_INVOKABLE static bool directoryExists(const QString &path);
+    Q_INVOKABLE static bool fileExists(const QString &path);
+    Q_INVOKABLE qint64 systemTotalRAMInGB() const;
+    Q_INVOKABLE QString systemTotalRAMInGBString() const;
+    Q_INVOKABLE bool isNetworkOnline() const;
 
 Q_SIGNALS:
-    void chatListModelChanged();
-    void threadCountChanged();
-    void serverEnabledChanged();
-    void compatHardwareChanged();
-
-private Q_SLOTS:
-    void aboutToQuit();
+    void isNetworkOnlineChanged();
 
 private:
-    ChatListModel *m_chatListModel;
-    int32_t m_threadCount;
-    bool m_serverEnabled;
     bool m_compatHardware;
 
 private:

@@ -1,15 +1,21 @@
 #include "llm.h"
-#include "config.h"
-#include "download.h"
-#include "network.h"
+#include "../gpt4all-backend/llmodel.h"
+#include "../gpt4all-backend/sysinfo.h"
 
 #include <QCoreApplication>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
 #include <QProcess>
 #include <QResource>
 #include <QSettings>
+#include <QUrl>
+#include <QNetworkInformation>
 #include <fstream>
+
+#ifndef GPT4ALL_OFFLINE_INSTALLER
+#include "network.h"
+#endif
 
 class MyLLM: public LLM { };
 Q_GLOBAL_STATIC(MyLLM, llmInstance)
@@ -20,29 +26,29 @@ LLM *LLM::globalInstance()
 
 LLM::LLM()
     : QObject{nullptr}
-    , m_chatListModel(new ChatListModel(this))
-    , m_threadCount(std::min(4, (int32_t) std::thread::hardware_concurrency()))
-    , m_serverEnabled(false)
-    , m_compatHardware(true)
+    , m_compatHardware(LLModel::Implementation::hasSupportedCPU())
 {
-    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
-        this, &LLM::aboutToQuit);
-    connect(this, &LLM::serverEnabledChanged,
-        m_chatListModel, &ChatListModel::handleServerEnabledChanged);
-
-#if defined(__x86_64__) || defined(__i386__)
-    if (QString(GPT4ALL_AVX_ONLY) == "OFF") {
-        const bool avx(__builtin_cpu_supports("avx"));
-        const bool avx2(__builtin_cpu_supports("avx2"));
-        const bool fma(__builtin_cpu_supports("fma"));
-        m_compatHardware = avx && avx2 && fma;
-        emit compatHardwareChanged();
+    QNetworkInformation::loadDefaultBackend();
+    auto * netinfo = QNetworkInformation::instance();
+    if (netinfo) {
+        connect(netinfo, &QNetworkInformation::reachabilityChanged,
+            this, &LLM::isNetworkOnlineChanged);
     }
-#endif
+}
+
+bool LLM::hasSettingsAccess() const
+{
+    QSettings settings;
+    settings.sync();
+    return settings.status() == QSettings::NoError;
 }
 
 bool LLM::checkForUpdates() const
 {
+    #ifdef GPT4ALL_OFFLINE_INSTALLER
+    #pragma message "offline installer build will not check for updates!"
+    return QDesktopServices::openUrl(QUrl("https://gpt4all.io/"));
+    #else
     Network::globalInstance()->sendCheckForUpdates();
 
 #if defined(Q_OS_LINUX)
@@ -61,35 +67,37 @@ bool LLM::checkForUpdates() const
     }
 
     return QProcess::startDetached(fileName);
+    #endif
 }
 
-int32_t LLM::threadCount() const
+bool LLM::directoryExists(const QString &path)
 {
-    return m_threadCount;
+    const QUrl url(path);
+    const QString localFilePath = url.isLocalFile() ? url.toLocalFile() : path;
+    const QFileInfo info(localFilePath);
+    return info.exists() && info.isDir();
 }
 
-void LLM::setThreadCount(int32_t n_threads)
+bool LLM::fileExists(const QString &path)
 {
-    if (n_threads <= 0)
-        n_threads = std::min(4, (int32_t) std::thread::hardware_concurrency());
-    m_threadCount = n_threads;
-    emit threadCountChanged();
+    const QUrl url(path);
+    const QString localFilePath = url.isLocalFile() ? url.toLocalFile() : path;
+    const QFileInfo info(localFilePath);
+    return info.exists() && info.isFile();
 }
 
-bool LLM::serverEnabled() const
+qint64 LLM::systemTotalRAMInGB() const
 {
-    return m_serverEnabled;
+    return getSystemTotalRAMInGB();
 }
 
-void LLM::setServerEnabled(bool enabled)
+QString LLM::systemTotalRAMInGBString() const
 {
-    if (m_serverEnabled == enabled)
-        return;
-    m_serverEnabled = enabled;
-    emit serverEnabledChanged();
+    return QString::fromStdString(getSystemTotalRAMInGBString());
 }
 
-void LLM::aboutToQuit()
+bool LLM::isNetworkOnline() const
 {
-    m_chatListModel->saveChats();
+    auto * netinfo = QNetworkInformation::instance();
+    return !netinfo || netinfo->reachability() == QNetworkInformation::Reachability::Online;
 }

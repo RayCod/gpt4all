@@ -2,7 +2,7 @@ package gpt4all
 
 type PredictOptions struct {
 	ContextSize, RepeatLastN, Tokens, TopK, Batch  int
-	TopP, Temperature, ContextErase, RepeatPenalty float64
+	TopP, MinP, Temperature, ContextErase, RepeatPenalty float64
 }
 
 type PredictOption func(p *PredictOptions)
@@ -11,6 +11,7 @@ var DefaultOptions PredictOptions = PredictOptions{
 	Tokens:        200,
 	TopK:          10,
 	TopP:          0.90,
+        MinP:          0.0,
 	Temperature:   0.96,
 	Batch:         1,
 	ContextErase:  0.55,
@@ -20,23 +21,14 @@ var DefaultOptions PredictOptions = PredictOptions{
 }
 
 var DefaultModelOptions ModelOptions = ModelOptions{
-	Threads:   4,
-	ModelType: GPTJType,
+	Threads: 4,
 }
 
 type ModelOptions struct {
-	Threads   int
-	ModelType ModelType
+	Threads           int
+	LibrarySearchPath string
 }
 type ModelOption func(p *ModelOptions)
-
-type ModelType int
-
-const (
-	LLaMAType ModelType = 0
-	GPTJType  ModelType = iota
-	MPTType   ModelType = iota
-)
 
 // SetTokens sets the number of tokens to generate.
 func SetTokens(tokens int) PredictOption {
@@ -56,6 +48,13 @@ func SetTopK(topk int) PredictOption {
 func SetTopP(topp float64) PredictOption {
 	return func(p *PredictOptions) {
 		p.TopP = topp
+	}
+}
+
+// SetMinP sets the value for min p sampling
+func SetMinP(minp float64) PredictOption {
+	return func(p *PredictOptions) {
+		p.MinP = minp
 	}
 }
 
@@ -110,10 +109,10 @@ func SetThreads(c int) ModelOption {
 	}
 }
 
-// SetModelType sets the model type.
-func SetModelType(c ModelType) ModelOption {
+// SetLibrarySearchPath sets the dynamic libraries used by gpt4all for the various ggml implementations.
+func SetLibrarySearchPath(t string) ModelOption {
 	return func(p *ModelOptions) {
-		p.ModelType = c
+		p.LibrarySearchPath = t
 	}
 }
 

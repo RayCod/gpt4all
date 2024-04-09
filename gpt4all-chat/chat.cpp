@@ -1,18 +1,19 @@
 #include "chat.h"
-#include "llm.h"
+#include "chatlistmodel.h"
+#include "mysettings.h"
+#include "modellist.h"
 #include "network.h"
-#include "download.h"
+#include "server.h"
 
 Chat::Chat(QObject *parent)
     : QObject(parent)
     , m_id(Network::globalInstance()->generateUniqueId())
     , m_name(tr("New Chat"))
     , m_chatModel(new ChatModel(this))
-    , m_responseInProgress(false)
+    , m_responseState(Chat::ResponseStopped)
     , m_creationDate(QDateTime::currentSecsSinceEpoch())
     , m_llmodel(new ChatLLM(this))
-    , m_isServer(false)
-    , m_shouldDeleteLater(false)
+    , m_collectionModel(new LocalDocsCollectionsModel(this))
 {
     connectLLM();
 }
@@ -22,11 +23,11 @@ Chat::Chat(bool isServer, QObject *parent)
     , m_id(Network::globalInstance()->generateUniqueId())
     , m_name(tr("Server Chat"))
     , m_chatModel(new ChatModel(this))
-    , m_responseInProgress(false)
+    , m_responseState(Chat::ResponseStopped)
     , m_creationDate(QDateTime::currentSecsSinceEpoch())
     , m_llmodel(new Server(this))
     , m_isServer(true)
-    , m_shouldDeleteLater(false)
+    , m_collectionModel(new LocalDocsCollectionsModel(this))
 {
     connectLLM();
 }
@@ -39,42 +40,43 @@ Chat::~Chat()
 
 void Chat::connectLLM()
 {
-    // Should be in same thread
-    connect(Download::globalInstance(), &Download::modelListChanged, this, &Chat::modelListChanged, Qt::DirectConnection);
-    connect(this, &Chat::modelNameChanged, this, &Chat::modelListChanged, Qt::DirectConnection);
-
     // Should be in different threads
-    connect(m_llmodel, &ChatLLM::isModelLoadedChanged, this, &Chat::isModelLoadedChanged, Qt::QueuedConnection);
-    connect(m_llmodel, &ChatLLM::isModelLoadedChanged, this, &Chat::handleModelLoadedChanged, Qt::QueuedConnection);
+    connect(m_llmodel, &ChatLLM::modelLoadingPercentageChanged, this, &Chat::handleModelLoadingPercentageChanged, Qt::QueuedConnection);
     connect(m_llmodel, &ChatLLM::responseChanged, this, &Chat::handleResponseChanged, Qt::QueuedConnection);
-    connect(m_llmodel, &ChatLLM::responseStarted, this, &Chat::responseStarted, Qt::QueuedConnection);
+    connect(m_llmodel, &ChatLLM::promptProcessing, this, &Chat::promptProcessing, Qt::QueuedConnection);
     connect(m_llmodel, &ChatLLM::responseStopped, this, &Chat::responseStopped, Qt::QueuedConnection);
-    connect(m_llmodel, &ChatLLM::modelNameChanged, this, &Chat::handleModelNameChanged, Qt::QueuedConnection);
-    connect(m_llmodel, &ChatLLM::modelLoadingError, this, &Chat::modelLoadingError, Qt::QueuedConnection);
+    connect(m_llmodel, &ChatLLM::modelLoadingError, this, &Chat::handleModelLoadingError, Qt::QueuedConnection);
+    connect(m_llmodel, &ChatLLM::modelLoadingWarning, this, &Chat::modelLoadingWarning, Qt::QueuedConnection);
     connect(m_llmodel, &ChatLLM::recalcChanged, this, &Chat::handleRecalculating, Qt::QueuedConnection);
     connect(m_llmodel, &ChatLLM::generatedNameChanged, this, &Chat::generatedNameChanged, Qt::QueuedConnection);
+    connect(m_llmodel, &ChatLLM::reportSpeed, this, &Chat::handleTokenSpeedChanged, Qt::QueuedConnection);
+    connect(m_llmodel, &ChatLLM::reportDevice, this, &Chat::handleDeviceChanged, Qt::QueuedConnection);
+    connect(m_llmodel, &ChatLLM::reportFallbackReason, this, &Chat::handleFallbackReasonChanged, Qt::QueuedConnection);
+    connect(m_llmodel, &ChatLLM::databaseResultsChanged, this, &Chat::handleDatabaseResultsChanged, Qt::QueuedConnection);
+    connect(m_llmodel, &ChatLLM::modelInfoChanged, this, &Chat::handleModelInfoChanged, Qt::QueuedConnection);
+    connect(m_llmodel, &ChatLLM::trySwitchContextOfLoadedModelCompleted, this, &Chat::trySwitchContextOfLoadedModelCompleted, Qt::QueuedConnection);
 
     connect(this, &Chat::promptRequested, m_llmodel, &ChatLLM::prompt, Qt::QueuedConnection);
-    connect(this, &Chat::modelNameChangeRequested, m_llmodel, &ChatLLM::modelNameChangeRequested, Qt::QueuedConnection);
+    connect(this, &Chat::modelChangeRequested, m_llmodel, &ChatLLM::modelChangeRequested, Qt::QueuedConnection);
     connect(this, &Chat::loadDefaultModelRequested, m_llmodel, &ChatLLM::loadDefaultModel, Qt::QueuedConnection);
     connect(this, &Chat::loadModelRequested, m_llmodel, &ChatLLM::loadModel, Qt::QueuedConnection);
     connect(this, &Chat::generateNameRequested, m_llmodel, &ChatLLM::generateName, Qt::QueuedConnection);
+    connect(this, &Chat::regenerateResponseRequested, m_llmodel, &ChatLLM::regenerateResponse, Qt::QueuedConnection);
+    connect(this, &Chat::resetResponseRequested, m_llmodel, &ChatLLM::resetResponse, Qt::QueuedConnection);
+    connect(this, &Chat::resetContextRequested, m_llmodel, &ChatLLM::resetContext, Qt::QueuedConnection);
+    connect(this, &Chat::processSystemPromptRequested, m_llmodel, &ChatLLM::processSystemPrompt, Qt::QueuedConnection);
 
-    // The following are blocking operations and will block the gui thread, therefore must be fast
-    // to respond to
-    connect(this, &Chat::regenerateResponseRequested, m_llmodel, &ChatLLM::regenerateResponse, Qt::BlockingQueuedConnection);
-    connect(this, &Chat::resetResponseRequested, m_llmodel, &ChatLLM::resetResponse, Qt::BlockingQueuedConnection);
-    connect(this, &Chat::resetContextRequested, m_llmodel, &ChatLLM::resetContext, Qt::BlockingQueuedConnection);
+    connect(this, &Chat::collectionListChanged, m_collectionModel, &LocalDocsCollectionsModel::setCollections);
 }
 
 void Chat::reset()
 {
     stopGenerating();
     // Erase our current on disk representation as we're completely resetting the chat along with id
-    LLM::globalInstance()->chatListModel()->removeChatFile(this);
-    emit resetContextRequested(); // blocking queued connection
+    ChatListModel::globalInstance()->removeChatFile(this);
+    emit resetContextRequested();
     m_id = Network::globalInstance()->generateUniqueId();
-    emit idChanged();
+    emit idChanged(m_id);
     // NOTE: We deliberately do no reset the name or creation date to indictate that this was originally
     // an older chat that was reset for another purpose. Resetting this data will lead to the chat
     // name label changing back to 'New Chat' and showing up in the chat model list as a 'New Chat'
@@ -88,22 +90,45 @@ void Chat::reset()
     m_chatModel->clear();
 }
 
-bool Chat::isModelLoaded() const
+void Chat::processSystemPrompt()
 {
-    return m_llmodel->isModelLoaded();
+    emit processSystemPromptRequested();
 }
 
-void Chat::prompt(const QString &prompt, const QString &prompt_template, int32_t n_predict,
-    int32_t top_k, float top_p, float temp, int32_t n_batch, float repeat_penalty,
-    int32_t repeat_penalty_tokens)
+bool Chat::isModelLoaded() const
 {
-    emit promptRequested(prompt, prompt_template, n_predict, top_k, top_p, temp, n_batch,
-        repeat_penalty, repeat_penalty_tokens, LLM::globalInstance()->threadCount());
+    return m_modelLoadingPercentage == 1.0f;
+}
+
+float Chat::modelLoadingPercentage() const
+{
+    return m_modelLoadingPercentage;
+}
+
+void Chat::resetResponseState()
+{
+    if (m_responseInProgress && m_responseState == Chat::LocalDocsRetrieval)
+        return;
+
+    m_tokenSpeed = QString();
+    emit tokenSpeedChanged();
+    m_responseInProgress = true;
+    m_responseState = m_collections.empty() ? Chat::PromptProcessing : Chat::LocalDocsRetrieval;
+    emit responseInProgressChanged();
+    emit responseStateChanged();
+}
+
+void Chat::prompt(const QString &prompt)
+{
+    resetResponseState();
+    emit promptRequested(m_collections, prompt);
 }
 
 void Chat::regenerateResponse()
 {
-    emit regenerateResponseRequested(); // blocking queued connection
+    const int index = m_chatModel->count() - 1;
+    m_chatModel->updateReferences(index, QString(), QList<QString>());
+    emit regenerateResponseRequested();
 }
 
 void Chat::stopGenerating()
@@ -113,60 +138,133 @@ void Chat::stopGenerating()
 
 QString Chat::response() const
 {
-    return m_llmodel->response();
+    return m_response;
 }
 
-void Chat::handleResponseChanged()
+Chat::ResponseState Chat::responseState() const
 {
+    return m_responseState;
+}
+
+void Chat::handleResponseChanged(const QString &response)
+{
+    if (m_responseState != Chat::ResponseGeneration) {
+        m_responseState = Chat::ResponseGeneration;
+        emit responseStateChanged();
+    }
+
+    m_response = response;
     const int index = m_chatModel->count() - 1;
-    m_chatModel->updateValue(index, response());
+    m_chatModel->updateValue(index, this->response());
     emit responseChanged();
 }
 
-void Chat::handleModelLoadedChanged()
+void Chat::handleModelLoadingPercentageChanged(float loadingPercentage)
 {
     if (m_shouldDeleteLater)
         deleteLater();
+
+    if (loadingPercentage == m_modelLoadingPercentage)
+        return;
+
+    m_modelLoadingPercentage = loadingPercentage;
+    emit modelLoadingPercentageChanged();
+    if (m_modelLoadingPercentage == 1.0f || m_modelLoadingPercentage == 0.0f)
+        emit isModelLoadedChanged();
 }
 
-void Chat::responseStarted()
+void Chat::promptProcessing()
 {
-    m_responseInProgress = true;
-    emit responseInProgressChanged();
+    m_responseState = !databaseResults().isEmpty() ? Chat::LocalDocsProcessing : Chat::PromptProcessing;
+    emit responseStateChanged();
 }
 
 void Chat::responseStopped()
 {
+    m_tokenSpeed = QString();
+    emit tokenSpeedChanged();
+
+    if (MySettings::globalInstance()->localDocsShowReferences()) {
+        const QString chatResponse = response();
+        QList<QString> references;
+        QList<QString> referencesContext;
+        int validReferenceNumber = 1;
+        for (const ResultInfo &info : databaseResults()) {
+            if (info.file.isEmpty())
+                continue;
+            if (validReferenceNumber == 1)
+                references.append((!chatResponse.endsWith("\n") ? "\n" : QString()) + QStringLiteral("\n---"));
+            QString reference;
+            {
+                QTextStream stream(&reference);
+                stream << (validReferenceNumber++) << ". ";
+                if (!info.title.isEmpty())
+                    stream << "\"" << info.title << "\". ";
+                if (!info.author.isEmpty())
+                    stream << "By " << info.author << ". ";
+                if (!info.date.isEmpty())
+                    stream << "Date: " << info.date << ". ";
+                stream << "In " << info.file << ". ";
+                if (info.page != -1)
+                    stream << "Page " << info.page << ". ";
+                if (info.from != -1) {
+                    stream << "Lines " << info.from;
+                    if (info.to != -1)
+                        stream << "-" << info.to;
+                    stream << ". ";
+                }
+                stream << "[Context](context://" << validReferenceNumber - 1 << ")";
+            }
+            references.append(reference);
+            referencesContext.append(info.text);
+        }
+
+        const int index = m_chatModel->count() - 1;
+        m_chatModel->updateReferences(index, references.join("\n"), referencesContext);
+        emit responseChanged();
+    }
+
     m_responseInProgress = false;
+    m_responseState = Chat::ResponseStopped;
     emit responseInProgressChanged();
-    if (m_llmodel->generatedName().isEmpty())
+    emit responseStateChanged();
+    if (m_generatedName.isEmpty())
         emit generateNameRequested();
     if (chatModel()->count() < 3)
         Network::globalInstance()->sendChatStarted();
 }
 
-QString Chat::modelName() const
+ModelInfo Chat::modelInfo() const
 {
-    return m_llmodel->modelName();
+    return m_modelInfo;
 }
 
-void Chat::setModelName(const QString &modelName)
+void Chat::setModelInfo(const ModelInfo &modelInfo)
 {
-    // doesn't block but will unload old model and load new one which the gui can see through changes
-    // to the isModelLoaded property
-    emit modelNameChangeRequested(modelName);
+    if (m_modelInfo == modelInfo && isModelLoaded())
+        return;
+
+    m_modelLoadingPercentage = std::numeric_limits<float>::min(); // small non-zero positive value
+    emit isModelLoadedChanged();
+    m_modelLoadingError = QString();
+    emit modelLoadingErrorChanged();
+    m_modelInfo = modelInfo;
+    emit modelInfoChanged();
+    emit modelChangeRequested(modelInfo);
 }
 
 void Chat::newPromptResponsePair(const QString &prompt)
 {
+    resetResponseState();
     m_chatModel->updateCurrentResponse(m_chatModel->count() - 1, false);
     m_chatModel->appendPrompt(tr("Prompt: "), prompt);
     m_chatModel->appendResponse(tr("Response: "), prompt);
-    emit resetResponseRequested(); // blocking queued connection
+    emit resetResponseRequested();
 }
 
 void Chat::serverNewPromptResponsePair(const QString &prompt)
 {
+    resetResponseState();
     m_chatModel->updateCurrentResponse(m_chatModel->count() - 1, false);
     m_chatModel->appendPrompt(tr("Prompt: "), prompt);
     m_chatModel->appendResponse(tr("Response: "), prompt);
@@ -175,16 +273,6 @@ void Chat::serverNewPromptResponsePair(const QString &prompt)
 bool Chat::isRecalc() const
 {
     return m_llmodel->isRecalc();
-}
-
-void Chat::loadDefaultModel()
-{
-    emit loadDefaultModelRequested();
-}
-
-void Chat::loadModel(const QString &modelName)
-{
-    emit loadModelRequested(modelName);
 }
 
 void Chat::unloadAndDeleteLater()
@@ -198,6 +286,11 @@ void Chat::unloadAndDeleteLater()
     unloadModel();
 }
 
+void Chat::markForDeletion()
+{
+    m_llmodel->setMarkedForDeletion(true);
+}
+
 void Chat::unloadModel()
 {
     stopGenerating();
@@ -209,11 +302,30 @@ void Chat::reloadModel()
     m_llmodel->setShouldBeLoaded(true);
 }
 
-void Chat::generatedNameChanged()
+void Chat::forceUnloadModel()
+{
+    stopGenerating();
+    m_llmodel->setForceUnloadModel(true);
+    m_llmodel->setShouldBeLoaded(false);
+}
+
+void Chat::forceReloadModel()
+{
+    m_llmodel->setForceUnloadModel(true);
+    m_llmodel->setShouldBeLoaded(true);
+}
+
+void Chat::trySwitchContextOfLoadedModel()
+{
+    emit trySwitchContextOfLoadedModelAttempted();
+    m_llmodel->setShouldTrySwitchContext(true);
+}
+
+void Chat::generatedNameChanged(const QString &name)
 {
     // Only use the first three words maximum and remove newlines and extra spaces
-    QString gen = m_llmodel->generatedName().simplified();
-    QStringList words = gen.split(' ', Qt::SkipEmptyParts);
+    m_generatedName = name.simplified();
+    QStringList words = m_generatedName.split(' ', Qt::SkipEmptyParts);
     int wordCount = qMin(3, words.size());
     m_name = words.mid(0, wordCount).join(' ');
     emit nameChanged();
@@ -225,10 +337,44 @@ void Chat::handleRecalculating()
     emit recalcChanged();
 }
 
-void Chat::handleModelNameChanged()
+void Chat::handleModelLoadingError(const QString &error)
 {
-    m_savedModelName = modelName();
-    emit modelNameChanged();
+    auto stream = qWarning().noquote() << "ERROR:" << error << "id";
+    stream.quote() << id();
+    m_modelLoadingError = error;
+    emit modelLoadingErrorChanged();
+}
+
+void Chat::handleTokenSpeedChanged(const QString &tokenSpeed)
+{
+    m_tokenSpeed = tokenSpeed;
+    emit tokenSpeedChanged();
+}
+
+void Chat::handleDeviceChanged(const QString &device)
+{
+    m_device = device;
+    emit deviceChanged();
+}
+
+void Chat::handleFallbackReasonChanged(const QString &fallbackReason)
+{
+    m_fallbackReason = fallbackReason;
+    emit fallbackReasonChanged();
+}
+
+void Chat::handleDatabaseResultsChanged(const QList<ResultInfo> &results)
+{
+    m_databaseResults = results;
+}
+
+void Chat::handleModelInfoChanged(const ModelInfo &modelInfo)
+{
+    if (m_modelInfo == modelInfo)
+        return;
+
+    m_modelInfo = modelInfo;
+    emit modelInfoChanged();
 }
 
 bool Chat::serialize(QDataStream &stream, int version) const
@@ -237,8 +383,17 @@ bool Chat::serialize(QDataStream &stream, int version) const
     stream << m_id;
     stream << m_name;
     stream << m_userName;
-    stream << m_savedModelName;
-    if (!m_llmodel->serialize(stream, version))
+    if (version > 4)
+        stream << m_modelInfo.id();
+    else
+        stream << m_modelInfo.filename();
+    if (version > 2)
+        stream << m_collections;
+
+    const bool serializeKV = MySettings::globalInstance()->saveChatsContext();
+    if (version > 5)
+        stream << serializeKV;
+    if (!m_llmodel->serialize(stream, version, serializeKV))
         return false;
     if (!m_chatModel->serialize(stream, version))
         return false;
@@ -249,88 +404,76 @@ bool Chat::deserialize(QDataStream &stream, int version)
 {
     stream >> m_creationDate;
     stream >> m_id;
-    emit idChanged();
+    emit idChanged(m_id);
     stream >> m_name;
     stream >> m_userName;
+    m_generatedName = QLatin1String("nonempty");
     emit nameChanged();
-    stream >> m_savedModelName;
+
+    QString modelId;
+    stream >> modelId;
+    if (version > 4) {
+        if (ModelList::globalInstance()->contains(modelId))
+            m_modelInfo = ModelList::globalInstance()->modelInfo(modelId);
+    } else {
+        if (ModelList::globalInstance()->containsByFilename(modelId))
+            m_modelInfo = ModelList::globalInstance()->modelInfoByFilename(modelId);
+    }
+    if (!m_modelInfo.id().isEmpty())
+        emit modelInfoChanged();
+
+    bool discardKV = m_modelInfo.id().isEmpty();
+
     // Prior to version 2 gptj models had a bug that fixed the kv_cache to F32 instead of F16 so
     // unfortunately, we cannot deserialize these
-    if (version < 2 && m_savedModelName.contains("gpt4all-j"))
-        return false;
-    m_llmodel->setModelName(m_savedModelName);
-    if (!m_llmodel->deserialize(stream, version))
+    if (version < 2 && m_modelInfo.filename().contains("gpt4all-j"))
+        discardKV = true;
+
+    if (version > 2) {
+        stream >> m_collections;
+        emit collectionListChanged(m_collections);
+    }
+
+    bool deserializeKV = true;
+    if (version > 5)
+        stream >> deserializeKV;
+
+    m_llmodel->setModelInfo(m_modelInfo);
+    if (!m_llmodel->deserialize(stream, version, deserializeKV, discardKV))
         return false;
     if (!m_chatModel->deserialize(stream, version))
         return false;
+
+    m_llmodel->setStateFromText(m_chatModel->text());
+
     emit chatModelChanged();
     return stream.status() == QDataStream::Ok;
 }
 
-QList<QString> Chat::modelList() const
+QList<QString> Chat::collectionList() const
 {
-    // Build a model list from exepath and from the localpath
-    QList<QString> list;
+    return m_collections;
+}
 
-    QString exePath = QCoreApplication::applicationDirPath() + QDir::separator();
-    QString localPath = Download::globalInstance()->downloadLocalModelsPath();
+bool Chat::hasCollection(const QString &collection) const
+{
+    return m_collections.contains(collection);
+}
 
-    QSettings settings;
-    settings.sync();
-    // The user default model can be set by the user in the settings dialog. The "default" user
-    // default model is "Application default" which signals we should use the default model that was
-    // specified by the models.json file.
-    QString defaultModel = settings.value("userDefaultModel").toString();
-    if (defaultModel.isEmpty() || defaultModel == "Application default")
-        defaultModel = settings.value("defaultModel").toString();
+void Chat::addCollection(const QString &collection)
+{
+    if (hasCollection(collection))
+        return;
 
-    QString currentModelName = modelName().isEmpty() ? defaultModel : modelName();
+    m_collections.append(collection);
+    emit collectionListChanged(m_collections);
+}
 
-    {
-        QDir dir(exePath);
-        dir.setNameFilters(QStringList() << "ggml-*.bin");
-        QStringList fileNames = dir.entryList();
-        for (QString f : fileNames) {
-            QString filePath = exePath + f;
-            QFileInfo info(filePath);
-            QString name = info.completeBaseName().remove(0, 5);
-            if (info.exists()) {
-                if (name == currentModelName)
-                    list.prepend(name);
-                else
-                    list.append(name);
-            }
-        }
-    }
+void Chat::removeCollection(const QString &collection)
+{
+    if (!hasCollection(collection))
+        return;
 
-    if (localPath != exePath) {
-        QDir dir(localPath);
-        dir.setNameFilters(QStringList() << "ggml-*.bin" << "chatgpt-*.txt");
-        QStringList fileNames = dir.entryList();
-        for (QString f : fileNames) {
-            QString filePath = localPath + f;
-            QFileInfo info(filePath);
-            QString basename = info.completeBaseName();
-            QString name = basename.startsWith("ggml-") ? basename.remove(0, 5) : basename;
-            if (info.exists() && !list.contains(name)) { // don't allow duplicates
-                if (name == currentModelName)
-                    list.prepend(name);
-                else
-                    list.append(name);
-            }
-        }
-    }
-
-    if (list.isEmpty()) {
-        if (exePath != localPath) {
-            qWarning() << "ERROR: Could not find any applicable models in"
-                       << exePath << "nor" << localPath;
-        } else {
-            qWarning() << "ERROR: Could not find any applicable models in"
-                       << exePath;
-        }
-        return QList<QString>();
-    }
-
-    return list;
+    m_collections.removeAll(collection);
+    emit collectionListChanged(m_collections);
 }

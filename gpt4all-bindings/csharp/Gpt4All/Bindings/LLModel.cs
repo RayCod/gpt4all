@@ -1,4 +1,7 @@
-﻿namespace Gpt4All.Bindings;
+﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+
+namespace Gpt4All.Bindings;
 
 /// <summary>
 /// Arguments for the response processing callback
@@ -39,25 +42,22 @@ public record ModelRecalculatingEventArgs(bool IsRecalculating);
 public class LLModel : ILLModel
 {
     protected readonly IntPtr _handle;
-    private readonly ModelType _modelType;
+    private readonly ILogger _logger;
     private bool _disposed;
 
-    public ModelType ModelType => _modelType;
-
-    internal LLModel(IntPtr handle, ModelType modelType)
+    internal LLModel(IntPtr handle, ILogger? logger = null)
     {
         _handle = handle;
-        _modelType = modelType;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <summary>
     /// Create a new model from a pointer
     /// </summary>
     /// <param name="handle">Pointer to underlying model</param>
-    /// <param name="modelType">The model type</param>
-    public static LLModel Create(IntPtr handle, ModelType modelType)
+    public static LLModel Create(IntPtr handle, ILogger? logger = null)
     {
-        return new LLModel(handle, modelType);
+        return new LLModel(handle, logger: logger);
     }
 
     /// <summary>
@@ -82,6 +82,8 @@ public class LLModel : ILLModel
         GC.KeepAlive(recalculateCallback);
         GC.KeepAlive(cancellationToken);
 
+        _logger.LogInformation("Prompt input='{Prompt}' ctx={Context}", text, context.Dump());
+
         NativeMethods.llmodel_prompt(
             _handle,
             text,
@@ -94,7 +96,12 @@ public class LLModel : ILLModel
             },
             (tokenId, response) =>
             {
-                if (cancellationToken.IsCancellationRequested) return false;
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    _logger.LogDebug("ResponseCallback evt=CancellationRequested");
+                    return false;
+                }
+
                 if (responseCallback == null) return true;
                 var args = new ModelResponseEventArgs(tokenId, response);
                 return responseCallback(args);
@@ -176,29 +183,13 @@ public class LLModel : ILLModel
     /// <returns>true if the model was loaded successfully, false otherwise.</returns>
     public bool Load(string modelPath)
     {
-        return NativeMethods.llmodel_loadModel(_handle, modelPath);
+        return NativeMethods.llmodel_loadModel(_handle, modelPath, 2048, 100);
     }
 
     protected void Destroy()
     {
         NativeMethods.llmodel_model_destroy(_handle);
     }
-
-    protected void DestroyLLama()
-    {
-        NativeMethods.llmodel_llama_destroy(_handle);
-    }
-
-    protected void DestroyGptj()
-    {
-        NativeMethods.llmodel_gptj_destroy(_handle);
-    }
-
-    protected void DestroyMtp()
-    {
-        NativeMethods.llmodel_mpt_destroy(_handle);
-    }
-
     protected virtual void Dispose(bool disposing)
     {
         if (_disposed) return;
@@ -208,21 +199,7 @@ public class LLModel : ILLModel
             // dispose managed state
         }
 
-        switch (_modelType)
-        {
-            case ModelType.LLAMA:
-                DestroyLLama();
-                break;
-            case ModelType.GPTJ:
-                DestroyGptj();
-                break;
-            case ModelType.MPT:
-                DestroyMtp();
-                break;
-            default:
-                Destroy();
-                break;
-        }
+        Destroy();
 
         _disposed = true;
     }

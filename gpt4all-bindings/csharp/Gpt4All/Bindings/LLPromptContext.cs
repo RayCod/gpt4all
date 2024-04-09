@@ -1,6 +1,4 @@
-﻿using System.Reflection;
-
-namespace Gpt4All.Bindings;
+﻿namespace Gpt4All.Bindings;
 
 /// <summary>
 /// Wrapper around the llmodel_prompt_context structure for holding the prompt context.
@@ -64,6 +62,15 @@ public unsafe class LLModelPromptContext
     {
         get => _ctx.top_p;
         set => _ctx.top_p = value;
+    }
+
+    /// <summary>
+    /// min p sampling probability threshold
+    /// </summary>
+    public float MinP
+    {
+        get => _ctx.min_p;
+        set => _ctx.min_p = value;
     }
 
     /// <summary>

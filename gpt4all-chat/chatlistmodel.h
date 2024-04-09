@@ -14,16 +14,31 @@ Q_SIGNALS:
     void chatRestored(Chat *chat);
 };
 
+class ChatSaver : public QObject
+{
+    Q_OBJECT
+public:
+    explicit ChatSaver();
+    void stop();
+
+Q_SIGNALS:
+    void saveChatsFinished();
+
+public Q_SLOTS:
+    void saveChats(const QVector<Chat*> &chats);
+
+private:
+    QThread m_thread;
+};
+
 class ChatListModel : public QAbstractListModel
 {
     Q_OBJECT
     Q_PROPERTY(int count READ count NOTIFY countChanged)
     Q_PROPERTY(Chat *currentChat READ currentChat WRITE setCurrentChat NOTIFY currentChatChanged)
-    Q_PROPERTY(bool shouldSaveChats READ shouldSaveChats WRITE setShouldSaveChats NOTIFY shouldSaveChatsChanged)
-    Q_PROPERTY(bool shouldSaveChatGPTChats READ shouldSaveChatGPTChats WRITE setShouldSaveChatGPTChats NOTIFY shouldSaveChatGPTChatsChanged)
 
 public:
-    explicit ChatListModel(QObject *parent = nullptr);
+    static ChatListModel *globalInstance();
 
     enum Roles {
         IdRole = Qt::UserRole + 1,
@@ -69,7 +84,7 @@ public:
     Q_INVOKABLE void addChat()
     {
         // Don't add a new chat if we already have one
-        if (m_newChat || m_dummyChat)
+        if (m_newChat)
             return;
 
         // Create a new chat pointer and connect it to determine when it is populated
@@ -84,18 +99,6 @@ public:
         endInsertRows();
         emit countChanged();
         setCurrentChat(m_newChat);
-    }
-
-    Q_INVOKABLE void addDummyChat()
-    {
-        // Create a new dummy chat pointer and don't connect it
-        m_dummyChat = new Chat(this);
-        beginInsertRows(QModelIndex(), 0, 0);
-        m_chats.prepend(m_dummyChat);
-        endInsertRows();
-        emit countChanged();
-        m_currentChat = m_dummyChat;
-        emit currentChatChanged();
     }
 
     Q_INVOKABLE void addServerChat()
@@ -122,8 +125,6 @@ public:
             this, &ChatListModel::newChatCountChanged);
         connect(m_newChat, &Chat::nameChanged,
             this, &ChatListModel::nameChanged);
-        connect(m_newChat, &Chat::modelLoadingError,
-            this, &ChatListModel::handleModelLoadingError);
         setCurrentChat(m_newChat);
     }
 
@@ -141,6 +142,8 @@ public:
             m_newChat->disconnect(this);
             m_newChat = nullptr;
         }
+
+        chat->markForDeletion();
 
         const int index = m_chats.indexOf(chat);
         if (m_chats.count() < 3 /*m_serverChat included*/) {
@@ -178,9 +181,9 @@ public:
         if (m_currentChat && m_currentChat != m_serverChat)
             m_currentChat->unloadModel();
         m_currentChat = chat;
-        if (!m_currentChat->isModelLoaded() && m_currentChat != m_serverChat)
-            m_currentChat->reloadModel();
         emit currentChatChanged();
+        if (!m_currentChat->isModelLoaded() && m_currentChat != m_serverChat)
+            m_currentChat->trySwitchContextOfLoadedModel();
     }
 
     Q_INVOKABLE Chat* get(int index)
@@ -191,8 +194,11 @@ public:
 
     int count() const { return m_chats.size(); }
 
+    // stop ChatLLM threads for clean shutdown
+    void destroyChats() { for (auto *chat: m_chats) { chat->destroy(); } }
+
     void removeChatFile(Chat *chat) const;
-    void saveChats() const;
+    Q_INVOKABLE void saveChats();
     void restoreChat(Chat *chat);
     void chatsRestoredFinished();
 
@@ -202,8 +208,9 @@ public Q_SLOTS:
 Q_SIGNALS:
     void countChanged();
     void currentChatChanged();
-    void shouldSaveChatsChanged();
-    void shouldSaveChatGPTChatsChanged();
+    void chatsSavedFinished();
+    void requestSaveChats(const QVector<Chat*> &);
+    void saveChatsFinished();
 
 private Q_SLOTS:
     void newChatCountChanged()
@@ -227,13 +234,6 @@ private Q_SLOTS:
         emit dataChanged(index, index, {NameRole});
     }
 
-    void handleModelLoadingError(const QString &error)
-    {
-        Chat *chat = qobject_cast<Chat *>(sender());
-        qWarning() << "ERROR:" << qPrintable(error) << "id" << chat->id();
-        removeChat(chat);
-    }
-
     void printChats()
     {
         for (auto c : m_chats) {
@@ -244,13 +244,15 @@ private Q_SLOTS:
     }
 
 private:
-    bool m_shouldSaveChats;
-    bool m_shouldSaveChatGPTChats;
-    Chat* m_newChat;
-    Chat* m_dummyChat;
-    Chat* m_serverChat;
-    Chat* m_currentChat;
+    Chat* m_newChat = nullptr;
+    Chat* m_serverChat = nullptr;
+    Chat* m_currentChat = nullptr;
     QList<Chat*> m_chats;
+
+private:
+    explicit ChatListModel();
+    ~ChatListModel() {}
+    friend class MyChatListModel;
 };
 
 #endif // CHATITEMMODEL_H
